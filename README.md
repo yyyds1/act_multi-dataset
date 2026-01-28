@@ -23,6 +23,7 @@ You can find all scripted/human demo for simulated environments [here](https://d
 - ``constants.py`` Constants shared across files
 - ``utils.py`` Utils such as data loading and helper functions
 - ``visualize_episodes.py`` Save videos from a .hdf5 dataset
+- ``datasets`` Data Factory for ACT training
 
 
 ### Installation

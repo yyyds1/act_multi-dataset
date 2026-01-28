@@ -1,6 +1,6 @@
 import os
 import importlib
-from torch.utils.data import Dataset
+from .base import BaseDataset
 
 
 class DataFactory:
@@ -12,7 +12,7 @@ class DataFactory:
         cls._registry[data_type] = data_class
 
     @classmethod
-    def create_data(cls, data_type: str, *args, **kwargs) -> Dataset:
+    def create_data(cls, data_type: str, *args, **kwargs) -> BaseDataset:
         if data_type not in cls._registry:
             raise ValueError(f"Data type '{data_type}' not registered.")
         return cls._registry[data_type](*args, **kwargs)
