@@ -9,6 +9,7 @@ import pybullet as p
 import pybullet_data
 import tempfile
 import h5py
+from scipy.spatial.transform import Rotation as R
 
 # Add parent directory to sys.path to import modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -36,10 +37,60 @@ def load_panda_urdf(assets_dir):
     urdf_content = urdf_content.replace('package://Panda', panda_assets_path)
     
     # Create temp file
-    temp_urdf = tempfile.NamedTemporaryFile(delete=False, suffix='.urdf', mode='w')
+    temp_urdf = tempfile.NamedTemporaryFile(delete=False, suffix='.urdf', mode='wb')
     temp_urdf.write(urdf_content.encode('utf-8'))
     temp_urdf.close()
     return temp_urdf.name
+
+def create_coordinate_frame_bodies(p_mod, length=0.1, radius=0.005, colors=None):
+    """
+    Creates 3 bodies representing an RGB coordinate frame.
+    Returns list of 3 body IDs.
+    """
+    if colors is None:
+        colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]] # R, G, B
+    
+    # X Axis (Default Z -> Rotate +90 Y to align with X)
+    vis_x = p_mod.createVisualShape(
+        p_mod.GEOM_CYLINDER, 
+        radius=radius, 
+        length=length, 
+        rgbaColor=colors[0], 
+        visualFramePosition=[length/2, 0, 0], 
+        visualFrameOrientation=p_mod.getQuaternionFromEuler([0, np.pi/2, 0])
+    )
+    xb = p_mod.createMultiBody(baseVisualShapeIndex=vis_x)
+    p_mod.setCollisionFilterGroupMask(xb, -1, 0, 0) # Disable collisions
+    
+    # Y Axis (Default Z -> Rotate -90 X to align with Y)
+    vis_y = p_mod.createVisualShape(
+        p_mod.GEOM_CYLINDER, 
+        radius=radius, 
+        length=length, 
+        rgbaColor=colors[1], 
+        visualFramePosition=[0, length/2, 0], 
+        visualFrameOrientation=p_mod.getQuaternionFromEuler([-np.pi/2, 0, 0])
+    )
+    yb = p_mod.createMultiBody(baseVisualShapeIndex=vis_y)
+    p_mod.setCollisionFilterGroupMask(yb, -1, 0, 0)
+
+    # Z Axis (Default Z)
+    vis_z = p_mod.createVisualShape(
+        p_mod.GEOM_CYLINDER, 
+        radius=radius, 
+        length=length, 
+        rgbaColor=colors[2], 
+        visualFramePosition=[0, 0, length/2], 
+        visualFrameOrientation=p_mod.getQuaternionFromEuler([0, 0, 0])
+    )
+    zb = p_mod.createMultiBody(baseVisualShapeIndex=vis_z)
+    p_mod.setCollisionFilterGroupMask(zb, -1, 0, 0)
+    
+    return [xb, yb, zb]
+
+def update_frame_pose(p_mod, bodies, pos, orn):
+    for b in bodies:
+        p_mod.resetBasePositionAndOrientation(b, pos, orn)
 
 def main(args):
     dataset_name = args.dataset
@@ -170,8 +221,19 @@ def main(args):
     )
     
     # Create valid ref point visual
-    ref_sphere_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.03, rgbaColor=[1, 0, 0, 1])
+    # 1. Smaller radius for Ref Point
+    ref_sphere_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.015, rgbaColor=[1, 0, 0, 0.6])
     ref_body_id = p.createMultiBody(baseVisualShapeIndex=ref_sphere_id)
+    
+    # Create persistent frames for visualization
+    # Target EE Frame (Ground Truth) - Standard RGB
+    target_frame_bodies = create_coordinate_frame_bodies(p, length=0.1, radius=0.003)
+    # Current EE Frame (Simulation) - Yellow/Cyan/Magenta
+    # current_frame_bodies = create_coordinate_frame_bodies(p, length=0.1, radius=0.003, 
+    #                                                       colors=[[1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1]])
+    # Reference Point Frame - Darker RGB
+    ref_frame_bodies = create_coordinate_frame_bodies(p, length=0.1, radius=0.003,
+                                                      colors=[[0.5, 0, 0, 1], [0, 0.5, 0, 1], [0, 0, 0.5, 1]])
     
     print(f"Visualizing {len(dataset)} episodes...")
     
@@ -184,8 +246,38 @@ def main(args):
         # Ensure we convert to numpy
         joint_pose = obs['joint_pose'].numpy()
         ref_points = obs['ref_point'].numpy()
-        
+        if 'eepose' in obs:
+            eepose = obs['eepose'].numpy()
+        else:
+            eepose = None
+            print("Warning: eepose not found in obs")
+
         seq_len = joint_pose.shape[0]
+        
+        # Find EE Link Index
+        ee_link_idx = -1
+        # Try to find link with 'hand' or use last
+        for j in range(p.getNumJoints(panda_id)):
+            # info: [jointIndex, jointName, jointType, qIndex, uIndex, flags, jointDamping, jointFriction, jointLowerLimit, jointUpperLimit, jointMaxForce, jointMaxVelocity, linkName, jointAxis, parentFramePos, parentFrameOrn, parentIndex]
+            link_name = p.getJointInfo(panda_id, j)[12].decode('utf-8')
+            if 'hand' in link_name: # often panda_hand
+                 ee_link_idx = j
+                 break
+        if ee_link_idx == -1:
+             ee_link_idx = p.getNumJoints(panda_id) - 1
+
+        # Visualize Whole Reference Trajectory
+        if 'traj_bodies' in locals():
+             for b in traj_bodies:
+                 p.removeBody(b)
+        traj_bodies = []
+        for k in range(0, seq_len, 2): # sparse
+             rp = ref_points[k]
+             if len(rp) >= 3:
+                 # Green sphere for trajectory - Smaller Radius
+                 vid = p.createVisualShape(p.GEOM_SPHERE, radius=0.008, rgbaColor=[0, 1, 0, 0.5])
+                 bid = p.createMultiBody(baseVisualShapeIndex=vid, basePosition=rp[:3])
+                 traj_bodies.append(bid)
         
         output_file = f"visualize_{dataset_name}_{ep_key}.mp4"
         
@@ -232,33 +324,114 @@ def main(args):
         out = cv2.VideoWriter(output_file, fourcc, fps, (total_w, total_h))
         
         for t in range(seq_len):
+            p.removeAllUserDebugItems()
+
             # 1. Update Simulation
             jp = joint_pose[t] # 7D usually
             # Set Panda joints (0-6)
             for j in range(min(7, len(jp))):
                 p.resetJointState(panda_id, j, jp[j])
                 
+            # Root Alignment & Visualization
+            if eepose is not None:
+                target_ee = eepose[t]
+                t_ee_pos = target_ee[:3]
+                # Dataset orientation
+                if len(target_ee) >= 7:
+                    t_ori = target_ee[3:]
+                    # assume wxyz (libero) -> convert to xyzw (pybullet)
+                    # Libero: w, x, y, z
+                    # PyBullet: x, y, z, w
+                    # Note: We should verify if dataset is wxyz. Usually is.
+                    t_ee_orn = [t_ori[1], t_ori[2], t_ori[3], t_ori[0]]
+                else:
+                    t_ee_orn = [0, 0, 0, 1]
+
+                # Get Current FK (Rel to whatever base is now)
+                ls = p.getLinkState(panda_id, ee_link_idx, computeForwardKinematics=True)
+                cur_pos = ls[4]
+                cur_orn = ls[5] # xyzw
+
+                # Matrices
+                m_target = np.eye(4)
+                m_target[:3, :3] = R.from_quat(t_ee_orn).as_matrix()
+                m_target[:3, 3] = t_ee_pos
+                
+                m_cur = np.eye(4)
+                m_cur[:3, :3] = R.from_quat(cur_orn).as_matrix()
+                m_cur[:3, 3] = cur_pos
+                
+                b_pos, b_orn = p.getBasePositionAndOrientation(panda_id)
+                m_base = np.eye(4)
+                m_base[:3, :3] = R.from_quat(b_orn).as_matrix()
+                m_base[:3, 3] = b_pos
+                
+                # T_base_ee = inv(T_base) * T_cur
+                m_base_ee = np.linalg.inv(m_base) @ m_cur
+                
+                # Check Error (Difference between Target EE and Current FK EE)
+                # T_diff = inv(T_target) * T_cur
+                # Ideally should be Identity if matching perfectly.
+                m_diff = np.linalg.inv(m_target) @ m_cur
+                pos_err = np.linalg.norm(m_diff[:3, 3])
+                
+                # Check rotation error
+                # trace = 1 + 2 cos(theta)
+                tr = np.trace(m_diff[:3, :3])
+                theta = np.arccos(np.clip((tr - 1) / 2, -1, 1))
+                
+                # Print error stats periodically
+                # if t % 20 == 0:
+                #      print(f"Frame {t}: Pos Error: {pos_err:.4f} m, Rot Error: {np.degrees(theta):.2f} deg")
+
+                # 3. Move Robot Root to Match EE Pose
+                # T_new_base = T_target * inv(T_base_ee)
+                m_new_base = m_target @ np.linalg.inv(m_base_ee)
+                new_b_pos = m_new_base[:3, 3]
+                new_b_orn = R.from_matrix(m_new_base[:3, :3]).as_quat()
+                # PyBullet expects quat as xyzw
+                p.resetBasePositionAndOrientation(panda_id, new_b_pos, new_b_orn)
+                
+                # Visualize Target EE Coordinate Frame (Ground Truth) - RGB
+                update_frame_pose(p, target_frame_bodies, t_ee_pos, t_ee_orn)
+                
+                # Visualize Current FK EE Coordinate Frame (Simulation) - YCM
+                # After moving base, this should align with Target Frame
+                # We need to re-query link state to verify visual alignment if we care, 
+                # but for now we visualize where it *was* before correction or where it *is*?
+                # Actually, if we just moved the base to align them, the visual frame for "Current EE"
+                # will now be coincident with Target Frame in the NEXT step or immediately.
+                # Let's update it immediately to show alignment.
+                ls_aligned = p.getLinkState(panda_id, ee_link_idx, computeForwardKinematics=True)
+                cur_pos_aligned = ls_aligned[4]
+                cur_orn_aligned = ls_aligned[5]
+                # update_frame_pose(p, current_frame_bodies, cur_pos_aligned, cur_orn_aligned)
+
             # Update Gripper? 
             # If jp has more than 7 dims, assume gripper. 
             # Usually qpos is 7 (joints) + 2 (gripper).
             if len(jp) > 7:
-                 gripper_val = jp[7] # width?
-                 # Panda has 2 finger joints: panda_finger_joint1, panda_finger_joint2
-                 # Indices: usually 9, 10 in full body, but loaded fixed base:
-                 # getNumJoints
-                 # panda_finger_joint1 is 9, panda_finger_joint2 is 10 (approx)
-                 # We can just ignore visual fidelity of gripper for now if indices vary.
                  pass
 
             # Update Ref Point
             rp = ref_points[t] # 7 floats
             if len(rp) >= 3:
-                p.resetBasePositionAndOrientation(ref_body_id, rp[:3], [0,0,0,1])
+                rp_pos = rp[:3]
+                p.resetBasePositionAndOrientation(ref_body_id, rp_pos, [0,0,0,1])
+                # Ref Point Coordinate Frame
+                # 2. Use Coordinate Frame for Ref Point
+                rp_orn = [rp[4], rp[5], rp[6], rp[3]] if len(rp) >= 7 else [0, 0, 0, 1]
+                if len(rp) >= 7:
+                     # Check format. Usually ref_point follows eepose format?
+                     # If Libero ref_point is 7D, it might be wxyz or xyzw. 
+                     # Assuming default behavior if not specified.
+                     pass 
+                update_frame_pose(p, ref_frame_bodies, rp_pos, rp_orn)
 
             # 2. Render
             view_matrix = p.computeViewMatrixFromYawPitchRoll(
                 cameraTargetPosition=[0, 0, 0.5],
-                distance=1.2,
+                distance=2.0, # Moved away from 1.2
                 yaw=90,
                 pitch=-30,
                 roll=0,
@@ -299,6 +472,9 @@ def main(args):
                     
                     # RGB to BGR
                     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    
+                    # Rot 180
+                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_180)
                     
                     # Resize to fixed cam_w, cam_h if needed (should match)
                     if img_bgr.shape[0] != cam_h or img_bgr.shape[1] != cam_w:

@@ -11,23 +11,25 @@ class BaseDataset(torch.utils.data.Dataset, ABC):
         dataset_dir, 
         camera_names, 
         norm_stats,
+        history_obs_len = 0,
     ):
-        super.__init__()
+        # super.__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
+        self.history_obs_len = history_obs_len
 
     @abstractmethod
     def __getitem__(self, idx):
         """
-        Get an episode form the dataset.
+        Randomly get a frame in the episode with index idx from the dataset.
         
         Parameters:
             idx: index of the episode
         
         Returns:
-            A Sequence (obs, act)
+            A Sequence (obs, history_obs, actions, is_pad) where:
 
             obs: A dict with keys:
                 1. "joint_pose": Franka Panda 7D joint angle
@@ -36,7 +38,9 @@ class BaseDataset(torch.utils.data.Dataset, ABC):
                 4. "images": RGB images of side view and wrist view, normalize to [0, 1]
                 5. "ref_point": end effector reference 7D poses in root frame
 
+            history_obs: A dict with the same keys as obs, but contains the history observations before the current obs. The length of history is determined by history_obs_len.
             act: A tensor contains action
+            is_pad: A boolean tensor indicating padding, [seq_len]
         """
         pass
 

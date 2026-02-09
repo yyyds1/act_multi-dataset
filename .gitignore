@@ -138,4 +138,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-./assets/Panda
+
+**.mp4
+**/**.mp4

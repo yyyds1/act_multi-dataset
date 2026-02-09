@@ -314,6 +314,32 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
 
 def forward_pass(data, policy):
+    if len(data) == 4 and isinstance(data[0], dict):
+        # Handle LiberoDataset structure: obs, history_obs, act, is_pad
+        obs, history_obs, actions, is_pad = data
+        
+        # Move dicts to cuda
+        for k in obs:
+             if isinstance(obs[k], torch.Tensor):
+                 obs[k] = obs[k].cuda()
+             elif isinstance(obs[k], dict):
+                 for subk in obs[k]:
+                     obs[k][subk] = obs[k][subk].cuda()
+                     
+        for k in history_obs:
+            if isinstance(history_obs[k], torch.Tensor):
+                history_obs[k] = history_obs[k].cuda()
+            elif isinstance(history_obs[k], list): # possibly list of tensors if len=0 or similar
+                pass 
+            elif isinstance(history_obs[k], dict):
+                for subk in history_obs[k]:
+                    if isinstance(history_obs[k][subk], torch.Tensor):
+                       history_obs[k][subk] = history_obs[k][subk].cuda()
+
+        actions = actions.cuda()
+        is_pad = is_pad.cuda()
+        return policy(obs, history_obs, actions, is_pad)
+    
     image_data, qpos_data, action_data, is_pad = data
     image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
     return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
